@@ -9,14 +9,17 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include "ReferenceCountedBuffer.h"
 
 //==============================================================================
 /**
 */
-class VoiceSamplerAudioProcessor  : public juce::AudioProcessor,
-                                    private juce::MidiKeyboardStateListener
+class VoiceSamplerAudioProcessor  : 
+    public juce::AudioProcessor,
+    private juce::Thread
 {
 public:
+
     //==============================================================================
     VoiceSamplerAudioProcessor();
     ~VoiceSamplerAudioProcessor() override;
@@ -50,19 +53,19 @@ public:
     const juce::String getProgramName (int index) override;
     void changeProgramName (int index, const juce::String& newName) override;
 
+    void run() override;
+    void checkForBuffersToFree();
+
     //==============================================================================
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
-    //==================================================================================
-    // My functions
-    void handleNoteOn(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float velocity);
-    void handleNoteOff(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float velocity);
 private:
-    AudioTransportSource audioPlayer;
-    AudioFormatManager formatManager;
+ 
+    juce::SpinLock mutex;
+    juce::ReferenceCountedArray<ReferenceCountedBuffer> buffers;
+    ReferenceCountedBuffer::Ptr currentBuffer;
 
-    
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceSamplerAudioProcessor)
 };

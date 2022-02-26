@@ -12,19 +12,25 @@
 //==============================================================================
 VoiceSamplerAudioProcessor::VoiceSamplerAudioProcessor()
 #ifndef JucePlugin_PreferredChannelConfigurations
-     : AudioProcessor (BusesProperties()
+    : AudioProcessor (BusesProperties()
                      #if ! JucePlugin_IsMidiEffect
                       #if ! JucePlugin_IsSynth
                        .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                       #endif
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
-                       )
+                       ),
+    juce::Thread(juce::String("Background Thread"))
+    
 #endif
 {
-    // Temp stuff for file
-    File file = new File("");                                        // [9]
-    auto* reader = formatManager.createReaderFor(file);
+    startThread();
+
+    // Load audio files
+    File const dir = File::getCurrentWorkingDirectory();
+    File const audioFilesFolder = dir.getSiblingFile("VoiceAudioFiles");
+
+    Array<File> audioFiles = audioFilesFolder.findChildFiles(File::findFiles, false, ".wav");
 }
 
 VoiceSamplerAudioProcessor::~VoiceSamplerAudioProcessor()
@@ -94,6 +100,27 @@ void VoiceSamplerAudioProcessor::changeProgramName (int index, const juce::Strin
 }
 
 //==============================================================================
+
+void VoiceSamplerAudioProcessor::run()
+{
+    while (!threadShouldExit())
+    {
+        checkForBuffersToFree();
+        wait(500);
+    }
+}
+
+void VoiceSamplerAudioProcessor::checkForBuffersToFree()
+{
+    for (auto i = buffers.size(); --i >= 0;)                           // [1]
+    {
+        ReferenceCountedBuffer::Ptr buffer(buffers.getUnchecked(i)); // [2]
+
+        if (buffer->getReferenceCount() == 2)                          // [3]
+            buffers.remove(i);
+    }
+}
+
 void VoiceSamplerAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
     // Use this method as the place to do any pre-playback
@@ -147,24 +174,6 @@ void VoiceSamplerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    for (const auto metadata : midiMessages)
-    {
-        auto message = metadata.getMessage(); // Get MIDI message
-
-        if (message.isNoteOn()) // Key down
-        {
-            message = juce::MidiMessage::noteOn(message.getChannel(),
-                message.getNoteNumber(),
-                message.getVelocity());
-            audioPlayer.
-        }
-        if (message.isNoteOff()) // Key up
-        {
-            DBG(message.getNoteNumber());
-        }
-
-    }
-
     // This is the place where you'd normally do the guts of your plugin's
     // audio processing...
     // Make sure to reset the state if your inner loop is processing
@@ -205,15 +214,7 @@ void VoiceSamplerAudioProcessor::setStateInformation (const void* data, int size
 }
 
 
-void VoiceSamplerAudioProcessor::handleNoteOn(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float velocity) 
-{
-    DBG("On");
-}
 
-void VoiceSamplerAudioProcessor::handleNoteOff(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float /*velocity*/) 
-{
-    DBG("Off");
-}
 
 
 
