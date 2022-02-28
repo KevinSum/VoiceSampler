@@ -20,17 +20,42 @@ VoiceSamplerAudioProcessor::VoiceSamplerAudioProcessor()
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true)
                      #endif
                        ),
-    juce::Thread(juce::String("Background Thread"))
+    juce::MidiInputCallback(),
+    juce::MidiKeyboardStateListener()
     
 #endif
 {
-    startThread();
+    outputWaveform.clear();
 
     // Load audio files
     File const dir = File::getCurrentWorkingDirectory();
-    File const audioFilesFolder = dir.getSiblingFile("VoiceAudioFiles");
+    File const audioFilesFolder = dir.getChildFile("VoiceAudioFiles");
+    Array<File> audioFiles = audioFilesFolder.findChildFiles(File::TypesOfFileToFind::findFiles, false, "*.wav");
 
-    Array<File> audioFiles = audioFilesFolder.findChildFiles(File::findFiles, false, ".wav");
+    formatManager.registerBasicFormats();
+    waveformData.resize(audioFiles.size());
+
+    // Load audio files in buffers
+    for (int idx = 0; idx < audioFiles.size(); idx++)
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader(formatManager.createReaderFor(audioFiles[idx]));
+
+        if (reader != nullptr)
+        {
+            // Set size of buffer
+            auto duration = (float)reader->lengthInSamples / reader->sampleRate;
+            waveformData[idx].fileBuffer.setSize((int)reader->numChannels, (int)reader->lengthInSamples); // issue here
+
+            // Read audio file data into buffer
+            reader->read(&waveformData[idx].fileBuffer, 0, (int)reader->lengthInSamples, 0, true, true);
+
+            // Get name from file name (Which should hopefully be the midi note!) and assign to structure
+            juce::String midiNote = audioFiles[idx].getFileName().upToFirstOccurrenceOf(".", false, true);
+            waveformData[idx].midiNote = midiNote;
+        }
+    }
+
+    
 }
 
 VoiceSamplerAudioProcessor::~VoiceSamplerAudioProcessor()
@@ -59,6 +84,33 @@ bool VoiceSamplerAudioProcessor::producesMidi() const
    #else
     return false;
    #endif
+}
+
+void VoiceSamplerAudioProcessor::handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message)
+{
+    const juce::ScopedValueSetter<bool> scopedInputFlag(isAddingFromMidiInput, true);
+    keyboardState.processNextMidiEvent(message);
+}
+
+void VoiceSamplerAudioProcessor::handleNoteOn(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float velocity)
+{
+    for (int idx = 0; idx < waveformData.size(); idx++)
+    {
+        if (waveformData[idx].midiNote == (juce::String)midiNoteNumber)
+        {
+            outputWaveform = AudioSampleBuffer(1, waveformData[idx].fileBuffer.getNumSamples()); // Resize waveform output to match the sample we want to play
+            outputWaveform = waveformData[idx].fileBuffer;
+
+        }
+            
+    }   
+}
+
+void VoiceSamplerAudioProcessor::handleNoteOff(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float /*velocity*/)
+{
+    outputWaveform = AudioSampleBuffer(1, 1); // Size of output waveform is abitrary. This will change.
+    outputWaveform.clear();
+
 }
 
 bool VoiceSamplerAudioProcessor::isMidiEffect() const
@@ -101,25 +153,7 @@ void VoiceSamplerAudioProcessor::changeProgramName (int index, const juce::Strin
 
 //==============================================================================
 
-void VoiceSamplerAudioProcessor::run()
-{
-    while (!threadShouldExit())
-    {
-        checkForBuffersToFree();
-        wait(500);
-    }
-}
 
-void VoiceSamplerAudioProcessor::checkForBuffersToFree()
-{
-    for (auto i = buffers.size(); --i >= 0;)                           // [1]
-    {
-        ReferenceCountedBuffer::Ptr buffer(buffers.getUnchecked(i)); // [2]
-
-        if (buffer->getReferenceCount() == 2)                          // [3]
-            buffers.remove(i);
-    }
-}
 
 void VoiceSamplerAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
@@ -159,6 +193,8 @@ bool VoiceSamplerAudioProcessor::isBusesLayoutSupported (const BusesLayout& layo
 }
 #endif
 
+
+
 void VoiceSamplerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
 {
     juce::ScopedNoDenormals noDenormals;
@@ -174,17 +210,53 @@ void VoiceSamplerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
+    // Go through midi buffer and check for any midi messages
+    for (const auto midiMessage : midiMessages)
+    {
+        auto message = midiMessage.getMessage();
+        if (message.isNoteOn())
+        {
+            //message = juce::MidiMessage::noteOn(message.getChannel(), message.getNoteNumber(), 1.0f);
+            DBG("Note number " << message.getNoteNumber() << ": On");
+            handleNoteOn(&keyboardState, message.getChannel(), message.getNoteNumber(), message.getVelocity());
+        }
+        else if (message.isNoteOff())
+        {
+            handleNoteOff(&keyboardState, message.getChannel(), message.getNoteNumber(), message.getVelocity());
+            DBG("Note number " << message.getNoteNumber() << ": Off");
+            startSampleOffset = 0; // Since waveform buffer changes size, we need to reset the startSampleOffset to 0, so that we don't go into a negative start sample.
+        }
+    }
+
     // This is the place where you'd normally do the guts of your plugin's
     // audio processing...
     // Make sure to reset the state if your inner loop is processing
     // the samples and the outer loop is handling the channels.
     // Alternatively, you can process the samples with the channels
     // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer (channel);
 
-        // ..do something to the data...
+
+    int outputSamplesRemaining = buffer.getNumSamples(); // Keep track of how many samples left in the buffer that needs filling
+    int outputWriteSamplePos = 0; // Sample index in output buffer to start writing into
+
+    // Continously write waveform buffer into output buffer untill entire output buffer is filled
+    while (outputSamplesRemaining > 0)
+    {
+        int numSamplesToFill = juce::jmin(outputSamplesRemaining, outputWaveform.getNumSamples() - startSampleOffset); // Calculate how many samples we need to fill for a single cycle
+
+        // Write waveform buffer into output buffer. Cut it short if we've reached end of output buffer
+        for (auto channel = 0; channel < totalNumOutputChannels; ++channel)
+        {
+            buffer.copyFrom(channel, outputWriteSamplePos, outputWaveform, 0, startSampleOffset, numSamplesToFill); // Note: Waveform buffers should only have 1 channel
+        }
+
+        outputSamplesRemaining -= numSamplesToFill; // Keep track of how many samples left to fill in output buffer
+        outputWriteSamplePos += numSamplesToFill; // Keep track of which sample of the output buffer we're on
+
+        // If we've reached the end of the output buffer, then we need to keep track of where the waveform is cut off for the next buffer
+        startSampleOffset += numSamplesToFill; 
+        if (startSampleOffset == outputWaveform.getNumSamples())
+            startSampleOffset = 0;
     }
 }
 
@@ -212,10 +284,6 @@ void VoiceSamplerAudioProcessor::setStateInformation (const void* data, int size
     // You should use this method to restore your parameters from this memory block,
     // whose contents will have been created by the getStateInformation() call.
 }
-
-
-
-
 
 
 //==============================================================================

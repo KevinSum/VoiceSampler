@@ -16,7 +16,8 @@
 */
 class VoiceSamplerAudioProcessor  : 
     public juce::AudioProcessor,
-    private juce::Thread
+    private juce::MidiInputCallback,
+    private juce::MidiKeyboardStateListener
 {
 public:
 
@@ -43,6 +44,9 @@ public:
 
     bool acceptsMidi() const override;
     bool producesMidi() const override;
+    void handleIncomingMidiMessage(juce::MidiInput* source, const juce::MidiMessage& message) override;
+    void handleNoteOn(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float velocity) override;
+    void handleNoteOff(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float /*velocity*/) override;
     bool isMidiEffect() const override;
     double getTailLengthSeconds() const override;
 
@@ -53,18 +57,25 @@ public:
     const juce::String getProgramName (int index) override;
     void changeProgramName (int index, const juce::String& newName) override;
 
-    void run() override;
-    void checkForBuffersToFree();
-
     //==============================================================================
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
 private:
- 
-    juce::SpinLock mutex;
-    juce::ReferenceCountedArray<ReferenceCountedBuffer> buffers;
-    ReferenceCountedBuffer::Ptr currentBuffer;
+    // Waveform/buffer stuff
+    struct WaveformData {
+        juce::String midiNote;
+        AudioSampleBuffer fileBuffer;
+    };
+    std::vector<WaveformData> waveformData;
+    juce::AudioFormatManager formatManager;
+    AudioSampleBuffer outputWaveform = AudioSampleBuffer(1, 1); // Size of output waveform is abitrary. This will change.
+    int startSampleOffset = 0;
+
+
+    // MIDI stuff
+    bool isAddingFromMidiInput = false; // This flag is used to indicate that MIDI data is arriving from an external source, rather than mouse-clicks on the on-screen keyboard.
+    juce::MidiKeyboardState keyboardState; // The MidiKeyboardState class keeps track of which MIDI keys are currently held down.
 
     //==============================================================================
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (VoiceSamplerAudioProcessor)
