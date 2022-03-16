@@ -94,23 +94,10 @@ void VoiceSamplerAudioProcessor::handleIncomingMidiMessage(juce::MidiInput* sour
 
 void VoiceSamplerAudioProcessor::handleNoteOn(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float velocity)
 {
-    for (int idx = 0; idx < waveformData.size(); idx++)
-    {
-        if (waveformData[idx].midiNote == (juce::String)midiNoteNumber)
-        {
-            outputWaveform = AudioSampleBuffer(1, waveformData[idx].fileBuffer.getNumSamples()); // Resize waveform output to match the sample we want to play
-            outputWaveform = waveformData[idx].fileBuffer;
-
-        }
-            
-    }   
 }
 
 void VoiceSamplerAudioProcessor::handleNoteOff(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float /*velocity*/)
 {
-    outputWaveform = AudioSampleBuffer(1, 1); // Size of output waveform is abitrary. This will change.
-    outputWaveform.clear();
-
 }
 
 bool VoiceSamplerAudioProcessor::isMidiEffect() const
@@ -153,6 +140,26 @@ void VoiceSamplerAudioProcessor::changeProgramName (int index, const juce::Strin
 
 //==============================================================================
 
+void VoiceSamplerAudioProcessor::getWaveform(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float velocity)
+{
+    for (int idx = 0; idx < waveformData.size(); idx++)
+    {
+        if (waveformData[idx].midiNote == (juce::String)midiNoteNumber)
+        {
+            outputWaveform = AudioSampleBuffer(1, waveformData[idx].fileBuffer.getNumSamples()); // Resize waveform output to match the sample we want to play
+            outputWaveform = waveformData[idx].fileBuffer;
+
+        }
+
+    }
+}
+
+void VoiceSamplerAudioProcessor::clearWaveformBuffer()
+{
+    outputWaveform = AudioSampleBuffer(1, 1); // Size of output waveform is abitrary. This will change.
+    outputWaveform.clear();
+
+}
 
 
 void VoiceSamplerAudioProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
@@ -210,21 +217,29 @@ void VoiceSamplerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
+    // Smoothing to be applying on NoteOn and NoteOff
+    bool midiNoteDown = false;
+    bool midiNoteUp = false;
+    
     // Go through midi buffer and check for any midi messages
     for (const auto midiMessage : midiMessages)
     {
         auto message = midiMessage.getMessage();
         if (message.isNoteOn())
         {
+            startSampleOffset = 0;
             //message = juce::MidiMessage::noteOn(message.getChannel(), message.getNoteNumber(), 1.0f);
             DBG("Note number " << message.getNoteNumber() << ": On");
-            handleNoteOn(&keyboardState, message.getChannel(), message.getNoteNumber(), message.getVelocity());
+            getWaveform(&keyboardState, message.getChannel(), message.getNoteNumber(), message.getVelocity()); // Get the waveform we need before filling buffer
+
+            midiNoteDown = true;
         }
         else if (message.isNoteOff())
         {
-            handleNoteOff(&keyboardState, message.getChannel(), message.getNoteNumber(), message.getVelocity());
             DBG("Note number " << message.getNoteNumber() << ": Off");
-            startSampleOffset = 0; // Since waveform buffer changes size, we need to reset the startSampleOffset to 0, so that we don't go into a negative start sample.
+            
+
+            midiNoteUp = true;
         }
     }
 
@@ -258,6 +273,20 @@ void VoiceSamplerAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         if (startSampleOffset == outputWaveform.getNumSamples())
             startSampleOffset = 0;
     }
+
+    // Apply ramp if needed
+    if (midiNoteUp || midiNoteDown)
+    {
+        if (midiNoteDown)
+            buffer.applyGainRamp(0, 1000, 0, 1);
+        else if (midiNoteUp)
+        {
+            buffer.applyGainRamp(buffer.getNumSamples() - 1000, 1000, 1, 0); // Apply ramp to current buffer before clearing it
+            clearWaveformBuffer();
+            startSampleOffset = 0; // Since waveform buffer changes size, we need to reset the startSampleOffset to 0, so that we don't go into a negative start sample.
+        }
+    }
+
 }
 
 //==============================================================================

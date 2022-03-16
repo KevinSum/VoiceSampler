@@ -61,6 +61,8 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    void getWaveform(juce::MidiKeyboardState*, int midiChannel, int midiNoteNumber, float velocity);
+    void clearWaveformBuffer();
 private:
     // Waveform/buffer stuff
     struct WaveformData {
